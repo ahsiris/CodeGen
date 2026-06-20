@@ -1,0 +1,61 @@
+correlation_id,incident_type,is_risky,severity,mitre_technique,description
+corr-2e0c9ceade3648c2,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 18 spot instances with no tags, then terminated to evade detection."
+corr-16e18d34813746eb,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 23 spot instances with no tags, then terminated to evade detection."
+corr-26d2b5b4a08649dc,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 27 spot instances with no tags, then terminated to evade detection."
+corr-4cf56a506796438b,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 17 spot instances with no tags, then terminated to evade detection."
+corr-846a584936214008,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 20 spot instances with no tags, then terminated to evade detection."
+corr-8671f31e61624f83,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 29 spot instances with no tags, then terminated to evade detection."
+corr-61869e7743914800,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 16 spot instances with no tags, then terminated to evade detection."
+corr-a333f8c702f244ba,resource_hijacking,True,critical,T1496,"Compromised CI/CD account assumed high-privilege role off-hours, burst-created 30 spot instances with no tags, then terminated to evade detection."
+corr-83d2de14525b442c,public_exposure,True,high,T1190,"Privileged debug pod exposed via NodePort (0.0.0.0/0), no controller owner, short TTL suggesting deliberate evasion."
+corr-febc5e6c111d49d2,public_exposure,True,high,T1190,"Privileged debug pod exposed via NodePort (0.0.0.0/0), no controller owner, short TTL suggesting deliberate evasion."
+corr-10b7928de47046be,public_exposure,True,high,T1190,"Privileged debug pod exposed via NodePort (0.0.0.0/0), no controller owner, short TTL suggesting deliberate evasion."
+corr-8affb45ad5a347e5,public_exposure,True,high,T1190,"Privileged debug pod exposed via NodePort (0.0.0.0/0), no controller owner, short TTL suggesting deliberate evasion."
+corr-45a5c1c40ed94e28,public_exposure,True,high,T1190,"Privileged debug pod exposed via NodePort (0.0.0.0/0), no controller owner, short TTL suggesting deliberate evasion."
+corr-fb0170e6ff4b47aa,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-75737246b6464ee8,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-b02ce5eb87da43f6,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-b3e4593433a74b03,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-4928f4efe91a45b8,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-f92d53bb7b354933,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-cfd1c5b1568042a1,identity_abuse,True,high,T1078,"Novel principal performed AssumeRole at 2-4AM, followed by cross-namespace S3 access and ClusterRoleBinding creation using federated identity from unusual IP."
+corr-9be3c4d9dfff4542,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-d65c79f9ed91428d,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-2d3e24735b0c47b8,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-b3e8603ca2484770,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-16e18d34813746eb,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-6f2fb28d544c4bef,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-d40fed836c7547bf,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-9c90a93429d24582,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-61869e7743914800,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-426a1bb5ba2842bb,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-c2cbfdd507644c73,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-b583d59588c742ba,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-bab5052307a84d76,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-64d1d74e99764a1f,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-8f830d56f32b4acc,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-7ef9a2906c2d4132,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-6f3eae2e49b347e2,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-23b58748105b4cd4,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-aebc4062eb134b23,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-cfd1c5b1568042a1,benign_burst,False,info,,Legitimate autoscaling or CI/CD burst. Normal ephemeral lifecycle activity.
+corr-56af8b0ccac94a9f,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-9be3c4d9dfff4542,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-2ffb2a1f1b45405c,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-44f834fed5bf4222,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-4a2b692ab5d9421f,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-865c8ae617e54ce6,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-2d7df020797446d6,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-014b9249bc3b4ae3,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-16e18d34813746eb,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-1204be8865f64a3a,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-7c1603f71c874ea7,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-d40fed836c7547bf,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-96cba1d396c9443e,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-9c90a93429d24582,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-18a0a7187a544f63,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-89909422a8c245a9,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-15d89eeb716b475f,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-26d2b5b4a08649dc,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-b3e4593433a74b03,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
+corr-6c9d910808894a47,routine_ephemeral,False,info,,Routine ephemeral resource lifecycle: short-lived compute or storage within expected parameters.
