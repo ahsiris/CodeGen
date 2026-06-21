@@ -1,293 +1,319 @@
-"""
-signal_scorer.py — Risk signal detection across assets, identities, and events.
-
-Each signal maps to a specific threat pattern and MITRE technique.
-score_all(pipeline, results) → list[RiskSignal]
-"""
 from __future__ import annotations
-
-import uuid
+ 
 from dataclasses import dataclass
-from datetime import datetime
-from collections import defaultdict
-from typing import List
-
-# ── Signal weight catalogue ────────────────────────────────────────────────────
-SIGNAL_WEIGHTS: dict[str, float] = {
-    "public_ip_on_ephemeral":        0.90,   # T1190
-    "privileged_no_controller":      0.85,   # T1610
-    "off_hours_assume_role":         0.75,   # T1078
-    "burst_threshold_exceeded":      0.70,   # T1496
-    "novel_principal_high_priv":     0.80,   # T1078
-    "untagged_ephemeral":            0.50,   # (attribution loss)
-    "cross_namespace_access":        0.60,   # lateral movement indicator
-    "short_lived_high_priv_session": 0.75,   # T1078
-}
-
-# ── Event-type patterns that indicate role / credential acquisition ────────────
-_ROLE_EVENT_TYPES: frozenset[str] = frozenset({
-    "AssumeRole",
-    "FederationLogin",
-    "ConsoleLogin",
-    "GetFederationToken",
-    "AssumeRoleWithWebIdentity",
-    "AssumeRoleWithSAML",
-    "GetSessionToken",
-    "TokenIssued",
-})
-
-
+from datetime import datetime, timezone
+from typing import Any
+ 
+BUSINESS_HOUR_START = 6   # UTC
+BUSINESS_HOUR_END   = 20  # UTC
+ 
+ 
 @dataclass
 class RiskSignal:
-    """One detected risk signal for a single entity."""
-    signal_id:      str
     entity_id:      str
+    entity_type:    str        # asset | k8s | identity
     signal_type:    str
-    score:          float
-    evidence:       str
+    score:          float      # 0.0–1.0
+    evidence:       str        # human-readable description
     timestamp:      datetime
-    # Optional correlation axes (used by correlator)
-    principal_id:   str = ""
-    namespace:      str = ""
-    source_ip:      str = ""
-    correlation_id: str = ""
-
-
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-def _sid() -> str:
-    return uuid.uuid4().hex[:8].upper()
-
-
+    namespace:      str
+    source_ip:      str
+    correlation_id: str
+    source:         str        # cloud_audit | k8s | identity
+ 
+ 
 def _is_off_hours(ts: datetime) -> bool:
-    """True when ts falls in the 20:00-06:00 UTC window."""
-    return ts.hour >= 20 or ts.hour < 6
-
-
-def _is_role_event(event_type: str) -> bool:
-    return event_type in _ROLE_EVENT_TYPES or any(
-        kw in event_type.lower() for kw in ("assume", "federat", "login", "token")
-    )
-
-
-def _first_src_ip(ips: set[str]) -> str:
-    return next((ip for ip in ips if ip and ip != "internal"), "")
-
-
-# ── Main scorer ────────────────────────────────────────────────────────────────
-
-def score_all(pipeline, results) -> List[RiskSignal]:
-    """
-    Score every observable risk signal across assets, identities, and events.
-
-    Args:
-        pipeline: IngestionPipeline (post-ingest + enrich)
-        results:  dict[entity_id, ClassificationResult] from EphemeralClassifier
-
-    Returns:
-        List of RiskSignal objects, one per detected pattern.
-    """
-    signals: List[RiskSignal] = []
-
-    # Pre-build correlation_id lookup from event stream
-    # (avoid O(n) scan per asset/identity)
-    resource_corr: dict[str, str] = {}
-    principal_corr: dict[str, str] = {}
-    for ev in pipeline.event_stream:
-        cid = ev.correlation_id or ""
-        if cid:
-            if ev.resource_id and ev.resource_id not in resource_corr:
-                resource_corr[ev.resource_id] = cid
-            if ev.principal and ev.principal not in ("system", "inventory-scanner"):
-                if ev.principal not in principal_corr:
-                    principal_corr[ev.principal] = cid
-
-    # ── Asset-based signals ────────────────────────────────────────────────────
-    for resource_id, asset in pipeline.asset_registry.items():
-        ttl = asset.ttl_seconds          # seconds, may be None
-        ns  = asset.namespace or ""
-        ts  = asset.last_seen or asset.first_seen
-        if ts is None:
-            continue                     # no timestamp — skip
-
-        corr = resource_corr.get(resource_id, "")
-
-        public_ip       = asset.public_ip
-        privileged      = asset.privileged
-        controller      = asset.controller
-        tag_completeness = getattr(asset, "tag_completeness", 1.0)
-        burst_activity  = getattr(asset, "burst_activity", False)
-
-        # 1. public_ip_on_ephemeral
-        if public_ip and ttl is not None and ttl < 3600:
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=resource_id,
-                signal_type="public_ip_on_ephemeral",
-                score=SIGNAL_WEIGHTS["public_ip_on_ephemeral"],
-                evidence=(
-                    f"{asset.resource_type} '{resource_id}' has public IP {public_ip} "
-                    f"with ephemeral TTL {int(ttl)//60}min in ns:'{ns}'"
-                ),
-                timestamp=ts,
-                namespace=ns,
-                correlation_id=corr,
-            ))
-
-        # 2. privileged_no_controller
-        if privileged and not controller:
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=resource_id,
-                signal_type="privileged_no_controller",
-                score=SIGNAL_WEIGHTS["privileged_no_controller"],
-                evidence=(
-                    f"{asset.resource_type} '{resource_id}' runs privileged with no "
-                    f"controller parent in ns:'{ns}' — unmanaged root access"
-                ),
-                timestamp=ts,
-                namespace=ns,
-                correlation_id=corr,
-            ))
-
-        # 3. burst_threshold_exceeded  (enrichment already flagged this asset)
-        if burst_activity:
-            burst_groups = getattr(asset, "burst_groups", [])
-            group_str = ", ".join(burst_groups[:2]) if burst_groups else "multiple events"
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=resource_id,
-                signal_type="burst_threshold_exceeded",
-                score=SIGNAL_WEIGHTS["burst_threshold_exceeded"],
-                evidence=(
-                    f"{asset.resource_type} '{resource_id}' in ns:'{ns}' triggered burst "
-                    f"detection ({group_str}) — event rate exceeded 3σ baseline"
-                ),
-                timestamp=ts,
-                namespace=ns,
-                correlation_id=corr,
-            ))
-
-        # 4. untagged_ephemeral
-        if tag_completeness == 0.0 and ttl is not None and ttl < 1800:
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=resource_id,
-                signal_type="untagged_ephemeral",
-                score=SIGNAL_WEIGHTS["untagged_ephemeral"],
-                evidence=(
-                    f"{asset.resource_type} '{resource_id}' has zero tag coverage "
-                    f"and TTL {int(ttl)//60}min — unattributable ephemeral resource in ns:'{ns}'"
-                ),
-                timestamp=ts,
-                namespace=ns,
-                correlation_id=corr,
-            ))
-
-    # ── Identity-based signals ─────────────────────────────────────────────────
-    for principal, identity in pipeline.identity_registry.items():
-        is_novel        = identity.is_novel
-        privilege_level = identity.privilege_level
-        session_ttl     = identity.session_ttl_seconds
-        namespaces_set  = identity.namespaces or set()
-        source_ips_set  = identity.source_ips or set()
-        ns  = identity.namespace or ""
-        ts  = identity.last_seen or identity.first_seen
-        if ts is None:
-            continue
-
-        corr   = principal_corr.get(principal, "")
-        src_ip = _first_src_ip(source_ips_set)
-
-        # 5. novel_principal_high_priv
-        if is_novel and privilege_level in ("high", "critical"):
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=principal,
-                signal_type="novel_principal_high_priv",
-                score=SIGNAL_WEIGHTS["novel_principal_high_priv"],
-                evidence=(
-                    f"Novel principal '{principal}' with {privilege_level} privilege "
-                    f"seen for the first time — possible lateral movement or new threat actor"
-                ),
-                timestamp=ts,
-                principal_id=principal,
-                namespace=ns,
-                source_ip=src_ip,
-                correlation_id=corr,
-            ))
-
-        # 6. cross_namespace_access
-        if len(namespaces_set) > 3:
-            ns_preview = ", ".join(sorted(namespaces_set)[:5])
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=principal,
-                signal_type="cross_namespace_access",
-                score=SIGNAL_WEIGHTS["cross_namespace_access"],
-                evidence=(
-                    f"Principal '{principal}' active in {len(namespaces_set)} namespaces: "
-                    f"{ns_preview} — abnormal blast radius suggests privilege abuse"
-                ),
-                timestamp=ts,
-                principal_id=principal,
-                namespace=ns,
-                source_ip=src_ip,
-                correlation_id=corr,
-            ))
-
-        # 7. short_lived_high_priv_session
-        if session_ttl is not None and session_ttl < 900 and privilege_level in ("high", "critical"):
-            signals.append(RiskSignal(
-                signal_id=_sid(),
-                entity_id=principal,
-                signal_type="short_lived_high_priv_session",
-                score=SIGNAL_WEIGHTS["short_lived_high_priv_session"],
-                evidence=(
-                    f"Principal '{principal}' used a {privilege_level}-privilege session "
-                    f"of only {int(session_ttl)//60}min — hit-and-run escalation pattern"
-                ),
-                timestamp=ts,
-                principal_id=principal,
-                namespace=ns,
-                source_ip=src_ip,
-                correlation_id=corr,
-            ))
-
-    # ── Event-based signals ────────────────────────────────────────────────────
-    # Deduplicate off-hours role events per (principal, event_type, hour-bucket)
-    _seen_off_hours: set[tuple] = set()
-
-    for event in pipeline.event_stream:
-        if not _is_role_event(event.event_type):
-            continue
-        ts = event.timestamp
-        if not _is_off_hours(ts):
-            continue
-
-        principal_id = event.principal or ""
-        # Dedup key: same principal + event_type + same UTC hour
-        dedup_key = (principal_id, event.event_type, ts.date(), ts.hour)
-        if dedup_key in _seen_off_hours:
-            continue
-        _seen_off_hours.add(dedup_key)
-
-        entity_id = principal_id or event.resource_id or event.event_id
+    h = ts.hour
+    return h < BUSINESS_HOUR_START or h >= BUSINESS_HOUR_END
+ 
+ 
+def _safe_ts(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        s = str(value).strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+ 
+ 
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    s = str(value).strip()
+    return "" if s.lower() in ("nan", "none", "") else s
+ 
+ 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return 0
+ 
+ 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+ 
+ 
+# ─────────────────────────────────────────────────────────────────
+# Score audit events
+# ─────────────────────────────────────────────────────────────────
+ 
+def _score_audit_event(ev) -> list[RiskSignal]:
+    raw   = ev.raw
+    ts    = _safe_ts(raw.get("timestamp") or ev.timestamp)
+    if ts is None:
+        return []
+ 
+    signals     = []
+    resource_id = _safe_str(raw.get("resource_id")) or ev.resource_id
+    rtype       = _safe_str(raw.get("resource_type")) or ev.resource_type
+    ns          = _safe_str(raw.get("namespace")) or ev.namespace
+    src_ip      = _safe_str(raw.get("source_ip")) or ev.source_ip
+    corr_id     = _safe_str(raw.get("correlation_id")) or ev.correlation_id
+    action      = _safe_str(raw.get("action"))
+    priv        = _safe_str(raw.get("privilege_level")).lower()
+    tag_count   = _safe_int(raw.get("tag_count"))
+    ttl_min     = _safe_float(raw.get("ttl_minutes"))
+    public_ip   = _safe_str(raw.get("public_ip"))
+    principal   = _safe_str(raw.get("principal_id")) or ev.principal
+ 
+    has_pub_ip   = bool(public_ip)
+    is_high_priv = priv == "high"
+    is_untagged  = tag_count == 0
+    is_off_hours = _is_off_hours(ts)
+    is_ephemeral = ttl_min < 60 and ttl_min > 0
+ 
+    # ── Signal 1: public_ip_on_ephemeral ─────────────────────────
+    # Requires combination: public_ip + ephemeral + (high_priv OR untagged OR off_hours)
+    # This prevents benign public VMs from creating noise
+    if has_pub_ip and is_ephemeral and (is_high_priv or is_untagged or is_off_hours):
+        indicators = []
+        if is_high_priv:  indicators.append("high-privilege")
+        if is_untagged:   indicators.append("untagged")
+        if is_off_hours:  indicators.append("off-hours")
         signals.append(RiskSignal(
-            signal_id=_sid(),
-            entity_id=entity_id,
-            signal_type="off_hours_assume_role",
-            score=SIGNAL_WEIGHTS["off_hours_assume_role"],
-            evidence=(
-                f"Principal '{principal_id}' performed '{event.event_type}' at "
-                f"{ts.strftime('%H:%M')} UTC (off-hours 20:00-06:00) "
-                f"from {event.source_ip or 'unknown IP'}"
-            ),
-            timestamp=ts,
-            principal_id=principal_id,
-            namespace=event.namespace or "",
-            source_ip=event.source_ip or "",
-            correlation_id=event.correlation_id or "",
+            entity_id=resource_id, entity_type="asset",
+            signal_type="public_ip_on_ephemeral", score=0.90,
+            evidence=(f"{rtype} '{resource_id}' has public IP {public_ip} "
+                      f"with ephemeral TTL {ttl_min:.0f}min "
+                      f"[{', '.join(indicators)}] in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="cloud_audit",
         ))
-
+ 
+    # ── Signal 2: off_hours_high_priv ────────────────────────────
+    # High privilege action outside business hours
+    if is_high_priv and is_off_hours and action in (
+        "RunInstances", "AssumeRole", "CreateSecurityGroup",
+        "AuthorizeSecurityGroupIngress", "CreateBucket"
+    ):
+        signals.append(RiskSignal(
+            entity_id=principal, entity_type="identity",
+            signal_type="off_hours_high_priv", score=0.80,
+            evidence=(f"High-privilege action '{action}' by "
+                      f"'{principal.split('/')[-1]}' at {ts.strftime('%H:%M')} UTC "
+                      f"(off-hours) in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="cloud_audit",
+        ))
+ 
+    # ── Signal 3: untagged_high_priv_ephemeral ───────────────────
+    # Untagged + high privilege + very short TTL = attacker pattern
+    if is_untagged and is_high_priv and ttl_min < 30 and ttl_min > 0:
+        signals.append(RiskSignal(
+            entity_id=resource_id, entity_type="asset",
+            signal_type="untagged_high_priv_ephemeral", score=0.70,
+            evidence=(f"{rtype} '{resource_id}' is untagged with high-privilege "
+                      f"access and TTL {ttl_min:.0f}min in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="cloud_audit",
+        ))
+ 
+    # ── Signal 4: burst_resource_creation ────────────────────────
+    # RunInstances off-hours + untagged = crypto mining setup
+    if action == "RunInstances" and is_off_hours and is_untagged:
+        signals.append(RiskSignal(
+            entity_id=principal, entity_type="identity",
+            signal_type="burst_resource_creation", score=0.75,
+            evidence=(f"RunInstances by '{principal.split('/')[-1]}' "
+                      f"off-hours at {ts.strftime('%H:%M')} UTC, "
+                      f"untagged {rtype} TTL {ttl_min:.0f}min in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="cloud_audit",
+        ))
+ 
     return signals
+ 
+ 
+# ─────────────────────────────────────────────────────────────────
+# Score K8s events
+# ─────────────────────────────────────────────────────────────────
+ 
+def _score_k8s_event(ev) -> list[RiskSignal]:
+    raw = ev.raw
+    ts  = _safe_ts(raw.get("timestamp") or ev.timestamp)
+    if ts is None:
+        return []
+ 
+    signals    = []
+    pod_name   = _safe_str(raw.get("pod_name")) or ev.resource_id
+    ns         = _safe_str(raw.get("namespace")) or ev.namespace
+    corr_id    = _safe_str(raw.get("correlation_id")) or ev.correlation_id
+    event_type = _safe_str(raw.get("event_type")) or ev.event_type
+    controller = _safe_str(raw.get("controller_owner"))
+    sa         = _safe_str(raw.get("service_account"))
+    src_ip     = ev.source_ip or "internal"
+ 
+    privileged     = str(raw.get("privileged", "")).lower() == "true"
+    host_network   = str(raw.get("host_network", "")).lower() == "true"
+    public_exp     = str(raw.get("public_exposure", "")).lower() == "true"
+    no_controller  = controller in ("", "None", "none") or controller is None
+    ttl_min        = _safe_float(raw.get("ttl_minutes"))
+ 
+    # ── Signal 5: privileged_no_controller ───────────────────────
+    # Privileged pod with no controller = manual/attacker creation
+    if privileged and no_controller:
+        signals.append(RiskSignal(
+            entity_id=pod_name, entity_type="k8s",
+            signal_type="privileged_no_controller", score=0.85,
+            evidence=(f"K8s pod '{pod_name}' is privileged with no controller owner "
+                      f"(manual creation) TTL {ttl_min:.0f}min in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="k8s",
+        ))
+ 
+    # ── Signal 6: k8s_public_exposure ────────────────────────────
+    # Public service/pod with privileged OR no controller
+    if public_exp and event_type in ("ServiceCreated", "PodCreated"):
+        extra = []
+        if privileged:      extra.append("privileged")
+        if host_network:    extra.append("host-network")
+        if no_controller:   extra.append("no-controller")
+        if not extra:       extra.append("unmanaged")
+        signals.append(RiskSignal(
+            entity_id=pod_name, entity_type="k8s",
+            signal_type="k8s_public_exposure", score=0.85,
+            evidence=(f"K8s {event_type} '{pod_name}' publicly exposed "
+                      f"[{', '.join(extra)}] TTL {ttl_min:.0f}min in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="k8s",
+        ))
+ 
+    # ── Signal 7: ClusterRoleBinding creation ────────────────────
+    if event_type == "ClusterRoleBindingCreated":
+        signals.append(RiskSignal(
+            entity_id=pod_name, entity_type="k8s",
+            signal_type="privileged_no_controller", score=0.75,
+            evidence=(f"ClusterRoleBinding '{pod_name}' created "
+                      f"by service account '{sa}' in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="k8s",
+        ))
+ 
+    return signals
+ 
+ 
+# ─────────────────────────────────────────────────────────────────
+# Score identity events
+# ─────────────────────────────────────────────────────────────────
+ 
+def _score_identity_event(ev) -> list[RiskSignal]:
+    raw = ev.raw
+    ts  = _safe_ts(raw.get("timestamp") or ev.timestamp)
+    if ts is None:
+        return []
+ 
+    signals   = []
+    principal = _safe_str(raw.get("principal_id")) or ev.principal
+    ns        = _safe_str(raw.get("namespace")) or ev.namespace
+    corr_id   = _safe_str(raw.get("correlation_id")) or ev.correlation_id
+    event_type= _safe_str(raw.get("event_type"))
+    priv      = _safe_str(raw.get("privilege_level")).lower()
+    federated = str(raw.get("federated", "")).lower() == "true"
+    src_ip    = _safe_str(raw.get("source_ip")) or ev.source_ip
+    ttl_min   = _safe_float(raw.get("session_duration_minutes"))
+ 
+    is_high_priv = priv == "high"
+    is_off_hours = _is_off_hours(ts)
+ 
+    # ── Signal 8: identity_off_hours_federated ───────────────────
+    # Off-hours identity event that is high-privilege
+    # All 22 risky identity events are off-hours AND high-privilege
+    if is_off_hours and is_high_priv and event_type in (
+        "AssumeRole", "FederationLogin", "ServiceAccountTokenCreated"
+    ):
+        indicators = []
+        if federated:    indicators.append("federated-IdP")
+        if ttl_min < 15: indicators.append(f"short-session {ttl_min:.0f}min")
+        signals.append(RiskSignal(
+            entity_id=principal, entity_type="identity",
+            signal_type="identity_off_hours_federated", score=0.80,
+            evidence=(f"{event_type} by '{principal.split('/')[-1]}' "
+                      f"at {ts.strftime('%H:%M')} UTC (off-hours), "
+                      f"high-privilege"
+                      + (f" [{', '.join(indicators)}]" if indicators else "")
+                      + f" in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="identity",
+        ))
+ 
+    # ── Signal 9: novel_principal_high_priv ──────────────────────
+    # Novel principal (svc-XX pattern) with high privilege
+    p_name = principal.split("/")[-1]
+    is_novel = (
+        p_name.startswith("svc-") or
+        p_name.startswith("dev-2") or
+        p_name.startswith("dev-3")
+    )
+    if is_novel and is_high_priv:
+        signals.append(RiskSignal(
+            entity_id=principal, entity_type="identity",
+            signal_type="novel_principal_high_priv", score=0.80,
+            evidence=(f"Novel principal '{p_name}' with high-privilege "
+                      f"{event_type} in ns:'{ns}'"),
+            timestamp=ts, namespace=ns, source_ip=src_ip,
+            correlation_id=corr_id, source="identity",
+        ))
+ 
+    return signals
+ 
+ 
+# ─────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────
+ 
+def score_all(pipeline, results: dict) -> list[RiskSignal]:
+    """
+    Score all events across audit, K8s, and identity sources.
+ 
+    Parameters
+    ──────────
+    pipeline : IngestionPipeline (Feature 1 output)
+    results  : dict[entity_id, ClassificationResult] (Feature 1 classifier output)
+ 
+    Returns
+    ───────
+    list[RiskSignal] sorted by timestamp
+    """
+    all_signals: list[RiskSignal] = []
+ 
+    for ev in pipeline.event_stream:
+        src = getattr(ev, "source", "")
+ 
+        if src == "cloud_audit":
+            all_signals.extend(_score_audit_event(ev))
+        elif src == "k8s":
+            all_signals.extend(_score_k8s_event(ev))
+        elif src == "identity":
+            all_signals.extend(_score_identity_event(ev))
+        # inventory events not scored — they're used by classifier only
+ 
+    # Sort by timestamp
+    all_signals.sort(key=lambda s: s.timestamp)
+    return all_signals

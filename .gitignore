@@ -12,3 +12,5 @@ results.json
 .vscode/
 
 *.log
+
+outputs/

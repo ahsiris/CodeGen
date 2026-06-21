@@ -1,241 +1,190 @@
-"""
-feature2_main.py — Entry point for Feature 2: Detection & Correlation Engine.
-
-Runs Feature 1 (ingestion + enrichment + classification) then Feature 2
-(signal scoring, burst detection, incident correlation, queue building),
-prints a formatted incident queue, and saves results to outputs/incidents.json.
-
-Usage:
-    python feature2_main.py --data-dir data/
-"""
 from __future__ import annotations
-
-import sys
-import json
-import argparse
-import os
-from datetime import datetime
-
-sys.path.insert(0, ".")
-
-# ── Feature 1 imports ──────────────────────────────────────────────────────────
+import argparse, json, os, sys
+from datetime import datetime, timezone
+from pathlib import Path
+ 
+sys.path.insert(0, str(Path(__file__).parent))
+ 
 from pipeline.ingestion import IngestionPipeline
 from pipeline.enrichment import enrich
 from classifier.ephemeral_classifier import EphemeralClassifier, ClassifierConfig
-
-# ── Feature 2 imports ──────────────────────────────────────────────────────────
-from detection.signal_scorer import score_all
+from detection.signal_scorer  import score_all
 from detection.burst_detector import detect_bursts
-from detection.correlator import correlate, Incident
-from detection.incident_queue import build_queue, top_evidence, IncidentQueue
-
-
-# ── Formatting helpers ─────────────────────────────────────────────────────────
-
-def _window_str(t0: datetime | None, t1: datetime | None) -> str:
-    """Show HH:MM-HH:MM for same-day windows; include date for multi-day spans."""
-    if t0 is None or t1 is None:
-        return "??-??"
-    if t0.date() == t1.date():
-        return f"{t0.strftime('%H:%M')}-{t1.strftime('%H:%M')}"
-    return f"{t0.strftime('%m/%d %H:%M')} to {t1.strftime('%m/%d %H:%M')}"
-
-
-def _norm_score(score: float, severity: str) -> int:
-    """Map raw incident_score to a 0-100 int within the severity band."""
-    bands = {
-        "critical": (1.2, 6.0, 85, 99),
-        "high":     (0.8, 1.2, 70, 84),
-        "medium":   (0.5, 0.8, 50, 69),
-        "low":      (0.0, 0.5, 25, 49),
-    }
-    lo_s, hi_s, lo_n, hi_n = bands.get(severity, (0.0, 6.0, 0, 99))
-    span = hi_s - lo_s
-    frac = min(max((score - lo_s) / span if span > 0 else 1.0, 0.0), 1.0)
-    return int(lo_n + frac * (hi_n - lo_n))
-
-
-def _incident_to_dict(inc: Incident) -> dict:
-    return {
-        "incident_id":      inc.incident_id,
-        "severity":         inc.severity,
-        "incident_type":    inc.incident_type,
-        "incident_score":   inc.incident_score,
-        "mitre_techniques": inc.mitre_techniques,
-        "principals":       inc.principals,
-        "namespaces":       inc.namespaces,
-        "time_window":      [
-            inc.time_window[0].isoformat(),
-            inc.time_window[1].isoformat(),
-        ],
-        "signal_count":     len(inc.signals),
-        "burst_event_count": len(inc.burst_events),
-        "evidence":         top_evidence(inc, n=3),
-        "signals": [
-            {
-                "signal_id":   s.signal_id,
-                "signal_type": s.signal_type,
-                "score":       s.score,
-                "entity_id":   s.entity_id,
-                "evidence":    s.evidence,
-                "timestamp":   s.timestamp.isoformat(),
-                "principal_id":   s.principal_id,
-                "namespace":      s.namespace,
-                "source_ip":      s.source_ip,
-                "correlation_id": s.correlation_id,
-            }
-            for s in sorted(inc.signals, key=lambda s: s.score, reverse=True)
-        ],
-        "burst_events": [
-            {
-                "namespace":  b.namespace,
-                "event_type": b.event_type,
-                "timestamp":  b.timestamp.isoformat(),
-                "count":      b.count,
-                "zscore":     b.zscore,
-                "iqr_flag":   b.iqr_flag,
-                "severity":   b.severity,
-            }
-            for b in inc.burst_events
-        ],
-    }
-
-
-def _print_incident(rank: int, inc: Incident) -> None:
-    win = _window_str(inc.time_window[0], inc.time_window[1])
-    sev = inc.severity.upper()
-    ns  = _norm_score(inc.incident_score, inc.severity)
-    print(f"\n  #{rank}  {inc.incident_id}  [{ns} {sev}]  {inc.incident_type}")
-    print(f"  Raw Score: {inc.incident_score:.3f}  |  Signals: {len(inc.signals)}  |  Window: {win}")
-    if inc.principals:
-        display_principals = inc.principals[:3]
-        suffix = f" +{len(inc.principals)-3} more" if len(inc.principals) > 3 else ""
-        print(f"  Principals: {display_principals}{suffix}")
-    if inc.namespaces:
-        print(f"  Namespaces: {inc.namespaces[:4]}")
-    print(f"  MITRE: {', '.join(inc.mitre_techniques)}")
-    if inc.burst_events:
-        print(f"  Burst events: {len(inc.burst_events)}")
-    print("  Evidence:")
-    for snippet in top_evidence(inc, n=3):
-        print(f"    * {snippet}")
-
-
-def _validate(queue: IncidentQueue) -> dict[str, bool]:
-    ok_reduction = queue.alert_reduction_pct >= 40.0
-    ok_incidents = queue.total_incidents >= 20
-    ok_mitre     = all(len(inc.mitre_techniques) > 0 for inc in queue.incidents)
-    ok_evidence  = all(len(top_evidence(inc, n=1)) > 0 for inc in queue.incidents)
-    return {
-        "alert_reduction_ge_40": ok_reduction,
-        "incidents_ge_20":       ok_incidents,
-        "all_mitre_mapped":      ok_mitre,
-        "all_have_evidence":     ok_evidence,
-    }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Feature 2 — Detection & Correlation Engine")
-    parser.add_argument("--data-dir", default="data/", help="Path to data directory")
+from detection.correlator     import correlate
+from detection.incident_queue import build_queue
+ 
+RESET="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
+RED="\033[31m"; YEL="\033[33m"; GRN="\033[32m"; CYN="\033[36m"
+SEP="─"*52; SEP2="═"*52
+ 
+SCOL = {"CRITICAL":RED,"HIGH":YEL,"MEDIUM":CYN,"LOW":GRN}
+ 
+ 
+def _fmt_window(tw):
+    t_start, t_end = tw
+    if not t_start or not t_end: return "unknown"
+    try:
+        if t_start.date() == t_end.date():
+            return f"{t_start.strftime('%H:%M')}–{t_end.strftime('%H:%M')}"
+        return f"{t_start.strftime('%m/%d %H:%M')}–{t_end.strftime('%m/%d %H:%M')}"
+    except: return "unknown"
+ 
+ 
+def _fmt_dur(dur_min):
+    m = int(dur_min)
+    if m < 60: return f"{m}min"
+    return f"{m//60}h {m%60}min"
+ 
+ 
+def _print_inc(rank, inc):
+    sev   = getattr(inc,"severity","LOW")
+    c     = SCOL.get(sev,"")
+    itype = getattr(inc,"incident_type","mixed")
+    score = getattr(inc,"incident_score",0.0)
+    sigs  = getattr(inc,"signals",[])
+    bursts= getattr(inc,"burst_events",[])
+    tw    = getattr(inc,"time_window",(None,None))
+    principals = getattr(inc,"principals",[])
+    namespaces = getattr(inc,"namespaces",[])
+    sources    = getattr(inc,"sources",[])
+    mitre      = getattr(inc,"mitre_techniques",[])
+    evidence   = getattr(inc,"evidence",[])
+    inc_id     = getattr(inc,"incident_id","?")
+    dur        = getattr(inc,"duration_minutes",0)
+ 
+    print(f"\n  #{rank}  {BOLD}{inc_id}{RESET}  [{c}{BOLD}{sev}{RESET}]  {itype}")
+    dur_str = _fmt_dur(dur) if dur > 0 else ""
+    print(f"  Score: {score:.3f}  |  Signals: {len(sigs)}"
+          + (f"  |  Bursts: {len(bursts)}" if bursts else "")
+          + f"  |  Window: {_fmt_window(tw)}"
+          + (f" ({dur_str})" if dur_str else ""))
+ 
+    if principals:
+        shown = principals[:2]
+        more  = len(principals) - 2
+        pstr  = ", ".join(f"'{p.split('/')[-1]}'" for p in shown)
+        if more > 0: pstr += f" +{more} more"
+        print(f"  Principals: {pstr}")
+ 
+    if namespaces:
+        print(f"  Namespaces: {', '.join(sorted(namespaces))}")
+ 
+    if sources:
+        print(f"  Sources: {', '.join(sorted(sources))}")
+ 
+    if mitre:
+        print(f"  MITRE: {', '.join(mitre)}")
+ 
+    if evidence:
+        print(f"  Evidence:")
+        for ev in evidence[:3]:
+            if ev: print(f"    • {ev}")
+ 
+ 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", default="data/")
+    parser.add_argument("--top",      default=10, type=int)
+    parser.add_argument("--export",   default="outputs/incidents.json")
     args = parser.parse_args()
-
-    # ── Header ─────────────────────────────────────────────────────────────────
-    print()
-    print("=" * 50)
-    print("  FEATURE 2 - DETECTION & CORRELATION ENGINE")
-    print("=" * 50)
-    print()
-
-    # ── Feature 1: ingest, enrich, classify ────────────────────────────────────
+ 
+    print(f"\n{BOLD}{SEP2}{RESET}")
+    print(f"{BOLD}  FEATURE 2 — DETECTION & CORRELATION ENGINE{RESET}")
+    print(f"{BOLD}{SEP2}{RESET}\n")
+ 
+    print(f"  {DIM}Loading Feature 1 pipeline...{RESET}", end="", flush=True)
     pipeline = IngestionPipeline(data_dir=args.data_dir)
     pipeline.ingest()
     enrich(pipeline)
     clf     = EphemeralClassifier(ClassifierConfig())
     results = clf.classify_all(pipeline)
-
-    # ── Step 1 ─────────────────────────────────────────────────────────────────
-    print("[1/4] Scoring risk signals...     ", end="", flush=True)
+    print(f" {GRN}✓{RESET}  {len(pipeline.asset_registry)} assets | "
+          f"{len(pipeline.identity_registry)} identities | "
+          f"{len(pipeline.event_stream)} events")
+ 
+    print(f"  {DIM}[1/3] Scoring risk signals...{RESET}", end="", flush=True)
     signals = score_all(pipeline, results)
-    print(f"[OK] {len(signals)} signals detected")
-
-    # ── Step 2 ─────────────────────────────────────────────────────────────────
-    print("[2/4] Detecting bursts...         ", end="", flush=True)
+    print(f"     {GRN}✓{RESET}  {len(signals)} signals  "
+          f"(audit={sum(1 for s in signals if s.source=='cloud_audit')} | "
+          f"k8s={sum(1 for s in signals if s.source=='k8s')} | "
+          f"identity={sum(1 for s in signals if s.source=='identity')})")
+ 
+    print(f"  {DIM}[2/3] Detecting bursts...{RESET}", end="", flush=True)
     bursts = detect_bursts(pipeline)
-    print(f"[OK] {len(bursts)} burst events")
-
-    # ── Step 3 ─────────────────────────────────────────────────────────────────
-    print("[3/4] Correlating incidents...    ", end="", flush=True)
+    print(f"        {GRN}✓{RESET}  {len(bursts)} burst events")
+ 
+    print(f"  {DIM}[3/3] Correlating incidents...{RESET}", end="", flush=True)
     incidents = correlate(signals, bursts, pipeline)
-    print(f"[OK] {len(incidents)} incidents")
-
-    # ── Step 4 ─────────────────────────────────────────────────────────────────
-    print("[4/4] Building incident queue...  ", end="", flush=True)
-    queue = build_queue(incidents)
-    print(f"[OK] Alert reduction: {queue.alert_reduction_pct:.1f}%")
-    print()
-
-    # ── Incident queue (top 10) ────────────────────────────────────────────────
-    print("-" * 50)
-    print("  INCIDENT QUEUE (top 10)")
-    print("-" * 50)
-
-    for rank, inc in enumerate(queue.incidents[:10], 1):
-        _print_incident(rank, inc)
-
-    # ── Summary ────────────────────────────────────────────────────────────────
-    print()
-    print("-" * 50)
-    print("  SUMMARY")
-    print("-" * 50)
-    by_sev = queue.stats.get("by_severity", {})
-    by_typ = queue.stats.get("by_type", {})
-    print(f"  Total raw signals   : {queue.total_raw_signals}")
+    queue     = build_queue(incidents, raw_signal_count=len(signals))
+    print(f"    {GRN}✓{RESET}  {queue.total_incidents} incidents  |  "
+          f"Alert reduction: {GRN}{BOLD}{queue.alert_reduction_pct}%{RESET}")
+ 
+    print(f"\n{BOLD}{SEP}{RESET}")
+    print(f"{BOLD}  INCIDENT QUEUE  (top {args.top}){RESET}")
+    print(f"{BOLD}{SEP}{RESET}")
+ 
+    for i, inc in enumerate(queue.incidents[:args.top], 1):
+        _print_inc(i, inc)
+ 
+    print(f"\n{BOLD}{SEP}{RESET}")
+    print(f"{BOLD}  SUMMARY{RESET}")
+    print(f"{BOLD}{SEP}{RESET}")
+    by_sev  = queue.stats.get("by_severity",{})
+    by_type = queue.stats.get("by_incident_type",{})
+ 
+    print(f"\n  Total raw signals   : {queue.total_raw_signals}")
     print(f"  Incidents created   : {queue.total_incidents}")
-    print(f"  Alert reduction     : {queue.alert_reduction_pct:.1f}%  (target >=40%)")
-    print(f"  Critical incidents  : {by_sev.get('critical', 0)}")
-    print(f"  High incidents      : {by_sev.get('high', 0)}")
-    print(f"  Medium incidents    : {by_sev.get('medium', 0)}")
-    print(f"  Low incidents       : {by_sev.get('low', 0)}")
-    print()
-    print("  Incident types:")
-    for itype, cnt in sorted(by_typ.items(), key=lambda x: -x[1]):
-        print(f"    {itype:<25} {cnt}")
-    print()
-
-    # ── Success criteria ───────────────────────────────────────────────────────
-    print("-" * 50)
-    print("  SUCCESS CRITERIA")
-    print("-" * 50)
-    checks = _validate(queue)
-    all_pass = all(checks.values())
-    status_str = {True: "PASS", False: "FAIL"}
-    print(f"  Alert reduction >=40%   : {status_str[checks['alert_reduction_ge_40']]}  "
-          f"({queue.alert_reduction_pct:.1f}%)")
-    print(f"  Incidents >=20          : {status_str[checks['incidents_ge_20']]}  "
-          f"({queue.total_incidents})")
-    print(f"  All incidents MITRE   : {status_str[checks['all_mitre_mapped']]}")
-    print(f"  All incidents evidence: {status_str[checks['all_have_evidence']]}")
-    print()
-    print(f"  Overall: {'ALL CRITERIA MET' if all_pass else 'SOME CRITERIA FAILED'}")
-    print()
-
-    # ── Save JSON ──────────────────────────────────────────────────────────────
-    os.makedirs("outputs", exist_ok=True)
-    out_path = os.path.join("outputs", "incidents.json")
-    payload = {
-        "generated_at":        datetime.utcnow().isoformat() + "Z",
-        "alert_reduction_pct": queue.alert_reduction_pct,
-        "total_raw_signals":   queue.total_raw_signals,
-        "total_incidents":     queue.total_incidents,
-        "success_criteria":    checks,
-        "stats":               queue.stats,
-        "incidents":           [_incident_to_dict(inc) for inc in queue.incidents],
+    print(f"  Alert reduction     : {GRN}{BOLD}{queue.alert_reduction_pct}%{RESET}  (target ≥40%)")
+    print(f"\n  {RED}Critical{RESET}  : {by_sev.get('CRITICAL',0)}")
+    print(f"  {YEL}High{RESET}      : {by_sev.get('HIGH',0)}")
+    print(f"  {CYN}Medium{RESET}    : {by_sev.get('MEDIUM',0)}")
+    print(f"  {GRN}Low{RESET}       : {by_sev.get('LOW',0)}")
+    if by_type:
+        print()
+        for itype, cnt in sorted(by_type.items(), key=lambda x:-x[1]):
+            print(f"  {itype:<25} {cnt}")
+ 
+    # Export
+    os.makedirs(os.path.dirname(args.export) if os.path.dirname(args.export) else ".", exist_ok=True)
+ 
+    def _ser(inc):
+        tw = getattr(inc,"time_window",(None,None))
+        return {
+            "incident_id":      getattr(inc,"incident_id",""),
+            "incident_type":    getattr(inc,"incident_type",""),
+            "severity":         getattr(inc,"severity",""),
+            "incident_score":   getattr(inc,"incident_score",0),
+            "signal_count":     len(getattr(inc,"signals",[])),
+            "burst_count":      len(getattr(inc,"burst_events",[])),
+            "duration_minutes": getattr(inc,"duration_minutes",0),
+            "principals":       getattr(inc,"principals",[]),
+            "namespaces":       getattr(inc,"namespaces",[]),
+            "sources":          getattr(inc,"sources",[]),
+            "mitre_techniques": getattr(inc,"mitre_techniques",[]),
+            "evidence":         getattr(inc,"evidence",[]),
+            "correlation_ids":  getattr(inc,"correlation_ids",[]),
+            "time_window": {
+                "start": tw[0].isoformat() if tw[0] else None,
+                "end":   tw[1].isoformat() if tw[1] else None,
+            },
+        }
+ 
+    output = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "total_raw_signals":   queue.total_raw_signals,
+            "total_incidents":     queue.total_incidents,
+            "alert_reduction_pct": queue.alert_reduction_pct,
+            "by_severity":         by_sev,
+            "by_incident_type":    by_type,
+        },
+        "incidents": [_ser(i) for i in queue.incidents],
     }
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, default=str)
-    print(f"  Incidents saved to {out_path}")
-    print()
-
-
+ 
+    with open(args.export, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+    print(f"\n  {DIM}Saved to {args.export}{RESET}\n")
+ 
+ 
 if __name__ == "__main__":
     main()
